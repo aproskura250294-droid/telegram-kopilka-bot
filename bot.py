@@ -14,45 +14,43 @@ from apscheduler.triggers.cron import CronTrigger
 
 # ================== НАСТРОЙКИ ==================
 TOKEN = "8115168584:AAFQer8ixzAdmhZN3HB4HoWEjGPYXUbS618"
-DB_PATH = "/data/piggybank.db"
 
-# создаём папку если её нет
-os.makedirs("/data", exist_ok=True)
+DATA_DIR = "/data"
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "piggybank.db")
 
 TZ = ZoneInfo("Europe/Moscow")
 
-# Автоотчёт: 1 числа в 09:00 (МСК) за ПРОШЛЫЙ месяц
 AUTO_REPORT_DAY = 1
 AUTO_REPORT_HOUR = 9
 AUTO_REPORT_MINUTE = 0
 
-# Если None — отчёт шлётся во все чаты, где были операции (удобно, если бот в одной группе).
-# Если указать chat_id (например -1001234567890) — отчёт будет слаться только туда.
 REPORT_CHAT_ID = None
 # ===============================================
+
+print("DB_PATH =", DB_PATH)
+print("DATA DIR EXISTS =", os.path.exists(DATA_DIR))
+print("DB FILE EXISTS BEFORE START =", os.path.exists(DB_PATH))
 
 
 @dataclass(frozen=True)
 class ParsedAmount:
-    cents: int  # копейки
+    cents: int
 
 
 NUMBER_RE = re.compile(
     r"""^\s*
-    (?P<num>[+-]?\d[\d\s\u00A0\u202F]*([.,]\d{1,2})?)   # число с пробелами и десятичной частью
-    \s*(?P<cur>₽|р\.?|руб\.?|рублей|рубля|руб)?\s*      # необязательная валюта
+    (?P<num>[+-]?\d[\d\s\u00A0\u202F]*([.,]\d{1,2})?)
+    \s*(?P<cur>₽|р\.?|руб\.?|рублей|рубля|руб)?\s*
     $""",
     re.IGNORECASE | re.VERBOSE,
 )
 
 
 def parse_amount_any(text: str) -> ParsedAmount | None:
-    """
-    Понимает: 500 / 1 500 / 1 500,50 / 1500р / 1500 руб / 1500.5
-    Возвращает сумму в копейках.
-    """
     if not text:
         return None
+
     m = NUMBER_RE.match(text)
     if not m:
         return None
@@ -60,6 +58,7 @@ def parse_amount_any(text: str) -> ParsedAmount | None:
     raw = m.group("num")
     raw = raw.replace(" ", "").replace("\u00A0", "").replace("\u202F", "")
     raw = raw.replace(",", ".")
+
     try:
         val = float(raw)
     except ValueError:
@@ -68,6 +67,7 @@ def parse_amount_any(text: str) -> ParsedAmount | None:
     cents = int(round(val * 100))
     if cents == 0:
         return None
+
     return ParsedAmount(cents=cents)
 
 
@@ -85,9 +85,6 @@ def prev_month(year: int, month: int) -> tuple[int, int]:
 
 
 def month_bounds_utc(year: int, month: int) -> tuple[str, str, str]:
-    """
-    Возвращает (start_utc_iso, end_utc_iso, title_yyyy_mm) по московскому времени.
-    """
     start_local = datetime(year, month, 1, 0, 0, 0, tzinfo=TZ)
     if month == 12:
         end_local = datetime(year + 1, 1, 1, 0, 0, 0, tzinfo=TZ)
@@ -109,16 +106,14 @@ async def init_db():
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
                 user_name TEXT NOT NULL,
-                amount_cents INTEGER NOT NULL,  -- + пополнение, - снятие
-                created_at_utc TEXT NOT NULL     -- ISO UTC
+                amount_cents INTEGER NOT NULL,
+                created_at_utc TEXT NOT NULL
             )
             """
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_tx_chat_time ON tx(chat_id, created_at_utc)"
         )
-
-        # Чаты, где был хоть один tx — чтобы знать куда слать автоотчёт (если REPORT_CHAT_ID=None)
         await db.execute(
             """
             CREATE TABLE IF NOT EXISTS chats (
@@ -128,6 +123,11 @@ async def init_db():
             """
         )
         await db.commit()
+
+    print("INIT_DB_DONE")
+    print("DB FILE EXISTS AFTER INIT =", os.path.exists(DB_PATH))
+    if os.path.exists(DB_PATH):
+        print("DB FILE SIZE AFTER INIT =", os.path.getsize(DB_PATH))
 
 
 async def touch_chat(chat_id: int):
@@ -155,7 +155,13 @@ async def add_tx(chat_id: int, user_id: int, user_name: str, amount_cents: int):
             (chat_id, user_id, user_name, amount_cents, now_utc),
         )
         await db.commit()
+
     await touch_chat(chat_id)
+
+    print(f"TX_SAVED chat_id={chat_id} user_id={user_id} amount={amount_cents}")
+    print("DB FILE EXISTS AFTER TX =", os.path.exists(DB_PATH))
+    if os.path.exists(DB_PATH):
+        print("DB FILE SIZE AFTER TX =", os.path.getsize(DB_PATH))
 
 
 async def get_total(chat_id: int) -> int:
@@ -165,7 +171,9 @@ async def get_total(chat_id: int) -> int:
             (chat_id,),
         ) as cur:
             row = await cur.fetchone()
-            return int(row[0] or 0)
+            total = int(row[0] or 0)
+            print(f"TOTAL_FOR_CHAT {chat_id} = {total}")
+            return total
 
 
 async def get_month_report(chat_id: int, year: int, month: int):
@@ -231,6 +239,33 @@ async def get_report_chat_ids():
     return [int(r[0]) for r in rows]
 
 
+async def get_all_time_report(chat_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """
+            SELECT user_id, user_name, COALESCE(SUM(amount_cents),0) AS s
+            FROM tx
+            WHERE chat_id=?
+            GROUP BY user_id, user_name
+            ORDER BY s DESC
+            """,
+            (chat_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+
+        async with db.execute(
+            """
+            SELECT COALESCE(SUM(amount_cents),0)
+            FROM tx
+            WHERE chat_id=?
+            """,
+            (chat_id,),
+        ) as cur2:
+            total_all = int((await cur2.fetchone())[0] or 0)
+
+    return rows, total_all
+
+
 # ================== ОТЧЁТЫ ==================
 async def send_monthly_report(bot: Bot, chat_id: int, year: int, month: int):
     title, rows, total_month = await get_month_report(chat_id, year, month)
@@ -255,10 +290,8 @@ async def send_monthly_report(bot: Bot, chat_id: int, year: int, month: int):
 
 
 async def scheduled_monthly_job(bot: Bot):
-    # Отчёт за ПРОШЛЫЙ месяц
     now_local = datetime.now(TZ)
     y, m = prev_month(now_local.year, now_local.month)
-
     targets = [REPORT_CHAT_ID] if REPORT_CHAT_ID is not None else await get_report_chat_ids()
 
     for cid in targets:
@@ -266,8 +299,8 @@ async def scheduled_monthly_job(bot: Bot):
             continue
         try:
             await send_monthly_report(bot, cid, y, m)
-        except Exception:
-            pass
+        except Exception as e:
+            print("MONTHLY_REPORT_ERROR:", repr(e))
 
 
 # ================== БОТ ==================
@@ -277,42 +310,60 @@ async def main():
     bot = Bot(TOKEN)
     dp = Dispatcher()
 
-    # Планировщик автоотчёта
     scheduler = AsyncIOScheduler(timezone=TZ)
     scheduler.add_job(
         scheduled_monthly_job,
-        trigger=CronTrigger(day=AUTO_REPORT_DAY, hour=AUTO_REPORT_HOUR, minute=AUTO_REPORT_MINUTE),
+        trigger=CronTrigger(
+            day=AUTO_REPORT_DAY,
+            hour=AUTO_REPORT_HOUR,
+            minute=AUTO_REPORT_MINUTE,
+        ),
         args=[bot],
         id="monthly_report",
         replace_existing=True,
     )
     scheduler.start()
 
-    # -------- Команды --------
     @dp.message(Command("total"))
     async def cmd_total(message: Message):
         total = await get_total(message.chat.id)
-        await message.answer(f"💰 В копилке сейчас: *{format_rub(total)}*", parse_mode="Markdown")
+        await message.answer(
+            f"💰 В копилке сейчас: *{format_rub(total)}*",
+            parse_mode="Markdown",
+        )
 
     @dp.message(Command("take"))
     async def cmd_take(message: Message):
         parts = (message.text or "").split(maxsplit=1)
         if len(parts) < 2:
-            await message.reply("Использование: `/take 500` или `/take 500,50`", parse_mode="Markdown")
+            await message.reply(
+                "Использование: `/take 500` или `/take 500,50`",
+                parse_mode="Markdown",
+            )
             return
 
         parsed = parse_amount_any(parts[1])
         if not parsed:
-            await message.reply("Не понял сумму. Пример: `/take 200` или `/take 1200,50`", parse_mode="Markdown")
+            await message.reply(
+                "Не понял сумму. Пример: `/take 200` или `/take 1200,50`",
+                parse_mode="Markdown",
+            )
             return
 
-        # Снятие: принимаем только положительное число, записываем как минус
         if parsed.cents <= 0:
-            await message.reply("Сумма для снятия должна быть положительной.", parse_mode="Markdown")
+            await message.reply(
+                "Сумма для снятия должна быть положительной.",
+                parse_mode="Markdown",
+            )
             return
 
         u = message.from_user
-        await add_tx(message.chat.id, u.id if u else 0, u.full_name if u else "Unknown", -parsed.cents)
+        await add_tx(
+            message.chat.id,
+            u.id if u else 0,
+            u.full_name if u else "Unknown",
+            -parsed.cents,
+        )
 
         total = await get_total(message.chat.id)
         await message.answer(
@@ -330,7 +381,10 @@ async def main():
         if len(parts) == 2:
             mm = re.match(r"^\s*(\d{4})-(\d{2})\s*$", parts[1])
             if not mm:
-                await message.reply("Формат: `/month` или `/month 2026-03`", parse_mode="Markdown")
+                await message.reply(
+                    "Формат: `/month` или `/month 2026-03`",
+                    parse_mode="Markdown",
+                )
                 return
             year = int(mm.group(1))
             month = int(mm.group(2))
@@ -358,9 +412,37 @@ async def main():
         lines = [f"🧾 Последние {min(limit, 100)} операций:"]
         for user_name, amount_cents, dt_local in rows:
             sign = "➕" if amount_cents > 0 else "➖"
-            lines.append(f"{dt_local:%d.%m %H:%M} — {sign} {format_rub(amount_cents)} — {user_name}")
+            lines.append(
+                f"{dt_local:%d.%m %H:%M} — {sign} {format_rub(amount_cents)} — {user_name}"
+            )
         lines.append(f"\n💰 Баланс: *{format_rub(await get_total(message.chat.id))}*")
         await message.answer("\n".join(lines), parse_mode="Markdown")
+
+    @dp.message(Command("all"))
+    async def cmd_all(message: Message):
+        rows, total_all = await get_all_time_report(message.chat.id)
+        if not rows:
+            await message.answer("Пока нет операций за всё время.")
+            return
+
+        lines = ["📊 За всё время:"]
+        for _, name, s in rows:
+            lines.append(f"• {name}: *{format_rub(int(s))}*")
+        lines.append(f"\nИтого: *{format_rub(total_all)}*")
+        await message.answer("\n".join(lines), parse_mode="Markdown")
+
+    @dp.message(Command("debugdb"))
+    async def cmd_debugdb(message: Message):
+        exists = os.path.exists(DB_PATH)
+        size = os.path.getsize(DB_PATH) if exists else 0
+        total = await get_total(message.chat.id)
+        await message.answer(
+            f"DB_PATH: `{DB_PATH}`\n"
+            f"Exists: `{exists}`\n"
+            f"Size: `{size}` bytes\n"
+            f"Current total: `{total}`",
+            parse_mode="Markdown",
+        )
 
     @dp.message(Command("help"))
     async def cmd_help(message: Message):
@@ -369,25 +451,30 @@ async def main():
             "• Написать сумму: `500`, `1500р`, `1 500,50`\n"
             "• /take 200 — снять\n"
             "• /total — баланс\n"
-            "• /month или /month 2026-03 — отчёт\n"
-            "• /history 20 — история\n\n"
+            "• /month или /month 2026-03 — отчёт за месяц\n"
+            "• /history 20 — история\n"
+            "• /all — вклад всех участников за всё время\n"
+            "• /debugdb — диагностика базы\n\n"
             f"Автоотчёт: {AUTO_REPORT_DAY}-го числа в {AUTO_REPORT_HOUR:02d}:{AUTO_REPORT_MINUTE:02d} (МСК) за прошлый месяц.",
             parse_mode="Markdown",
         )
 
-    # -------- Пополнение числом --------
     @dp.message(F.text)
     async def on_text(message: Message):
         parsed = parse_amount_any(message.text)
         if not parsed:
             return
 
-        # Пополнение только положительным числом
         if parsed.cents <= 0:
             return
 
         u = message.from_user
-        await add_tx(message.chat.id, u.id if u else 0, u.full_name if u else "Unknown", parsed.cents)
+        await add_tx(
+            message.chat.id,
+            u.id if u else 0,
+            u.full_name if u else "Unknown",
+            parsed.cents,
+        )
         total = await get_total(message.chat.id)
 
         await message.reply(
@@ -396,6 +483,7 @@ async def main():
             parse_mode="Markdown",
         )
 
+    print("BOT_STARTING")
     await dp.start_polling(bot)
 
 
