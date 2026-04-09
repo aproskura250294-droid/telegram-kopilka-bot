@@ -1,3 +1,4 @@
+import os
 import asyncio
 import re
 from dataclasses import dataclass
@@ -14,6 +15,9 @@ from apscheduler.triggers.cron import CronTrigger
 # ================== НАСТРОЙКИ ==================
 TOKEN = "8115168584:AAFQer8ixzAdmhZN3HB4HoWEjGPYXUbS618"
 DB_PATH = "/data/piggybank.db"
+
+# создаём папку если её нет
+os.makedirs("/data", exist_ok=True)
 
 TZ = ZoneInfo("Europe/Moscow")
 
