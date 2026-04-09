@@ -331,46 +331,7 @@ async def main():
             f"💰 В копилке сейчас: *{format_rub(total)}*",
             parse_mode="Markdown",
         )
-        @dp.message(Command("addfor"))
-async def cmd_addfor(message: Message):
-    parts = (message.text or "").split(maxsplit=2)
-
-    if len(parts) < 3:
-        await message.reply(
-            "Использование:\n`/addfor Иван 500`",
-            parse_mode="Markdown",
-        )
-        return
-
-    name = parts[1].strip()
-    amount_text = parts[2].strip()
-
-    parsed = parse_amount_any(amount_text)
-    if not parsed or parsed.cents <= 0:
-        await message.reply(
-            "Не понял сумму. Пример:\n`/addfor Иван 500`",
-            parse_mode="Markdown",
-        )
-        return
-
-    # записываем как будто это сделал "другой" пользователь
-    await add_tx(
-        message.chat.id,
-        user_id=0,  # фиктивный id
-        user_name=name,
-        amount_cents=parsed.cents,
-    )
-
-    total = await get_total(message.chat.id)
-
-    await message.answer(
-        f"👤 *{name}*\n"
-        f"➕ Добавлено: *{format_rub(parsed.cents)}*\n"
-        f"💰 В копилке теперь: *{format_rub(total)}*",
-        parse_mode="Markdown",
-    )
-
-
+       
     @dp.message(Command("take"))
     async def cmd_take(message: Message):
         parts = (message.text or "").split(maxsplit=1)
