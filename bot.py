@@ -13,7 +13,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 # ================== НАСТРОЙКИ ==================
 TOKEN = "8115168584:AAFQer8ixzAdmhZN3HB4HoWEjGPYXUbS618"
-DB_PATH = "piggybank.db"
+DB_PATH = "/data/piggybank.db"
 
 TZ = ZoneInfo("Europe/Moscow")
 
